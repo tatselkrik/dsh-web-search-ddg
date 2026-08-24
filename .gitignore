@@ -1,0 +1,6 @@
+node_modules/
+lib/**/*.js.map
+lib/**/*.d.ts.map
+*.tsbuildinfo
+.DS_Store
+Thumbs.db

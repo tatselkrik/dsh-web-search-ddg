@@ -1,0 +1,12 @@
+# Bundle layer contributed by dsh-web-search-ddg.
+# Inserts the provider into the ctx.web search registry. Selection is automatic
+# when it is the only usable search provider (the in-box DeepSeek provider stays
+# keyless/unavailable unless you configure its credential); pin explicitly with:
+#
+#   - id: web
+#     name: '@deepseek-ai/dsh-web'
+#     config:
+#       searchProvider: duckduckgo
+- insert:
+    - id: web-search-ddg
+      name: dsh-web-search-ddg
