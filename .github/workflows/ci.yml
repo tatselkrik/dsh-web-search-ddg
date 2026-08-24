@@ -17,13 +17,21 @@ jobs:
           node-version: 22
 
       - name: Install pnpm
-        run: npm install -g pnpm@11
+        run: npm install -g pnpm@11.7.0
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
-        run: pnpm exec tsc --noEmit
+        run: pnpm run typecheck
 
       - name: Unit tests
-        run: pnpm exec vitest run
+        run: pnpm test
+
+      - name: Verify committed runtime artifacts
+        run: |
+          pnpm run build
+          git diff --exit-code -- lib
+
+      - name: Smoke-test package entry point
+        run: node --input-type=module -e "const plugin = await import('./lib/index.js'); if (plugin.DDG_DEFAULT_TIMEOUT_MS !== 15000) throw new Error('unexpected package entry point')"

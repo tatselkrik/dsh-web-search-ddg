@@ -17,11 +17,7 @@ export declare const DDG_PROVIDER_ID = "duckduckgo";
 export declare const DDG_DEFAULT_BASE_URL = "https://lite.duckduckgo.com/lite/";
 /** Default upper bound on sources returned per search before seam truncation. */
 export declare const DDG_DEFAULT_LIMIT = 10;
-/**
- * Default per-request wall-clock cap, independent of caller cancellation: the
- * provider must not hang forever merely because a future consumer forgot its
- * timeout policy.
- */
+/** Default per-request wall-clock cap, independent of caller cancellation. */
 export declare const DDG_DEFAULT_TIMEOUT_MS = 15000;
 /** Default HTTP verb for the query form. */
 export declare const DDG_DEFAULT_METHOD: DdgRequestMethod;
@@ -35,7 +31,7 @@ export interface DdgSearchProviderOptions {
     limit: number;
     /** Query verb; POST survives some anomaly checks that GET trips. */
     method?: DdgRequestMethod;
-    /** Per-request wall-clock cap in milliseconds; defaults to {@link DDG_DEFAULT_TIMEOUT_MS}. */
+    /** Per-request wall-clock cap in milliseconds. */
     timeoutMs?: number;
 }
 /** One parsed result row before seam normalization. */
@@ -77,8 +73,8 @@ export declare function unwrapResultUrl(href: string): string | undefined;
  */
 export declare function parseLiteResults(html: string): ParsedRow[];
 /**
- * Build the request target for one query: the configured base with `q`
- * attached, preserving any parameters an operator layered onto the base URL.
+ * Build the request target for one query. GET carries `q` in the URL; POST
+ * preserves the configured base parameters and carries `q` only in its body.
  * @param options - resolved provider options.
  * @param query - the search query.
  * @returns the absolute request URL.

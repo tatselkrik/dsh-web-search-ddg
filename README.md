@@ -29,7 +29,7 @@ yours to audit, patch, and keep: free software deserves free search.
 
 - **Zero credentials** — `available()` is a pure config-shape check; nothing to store in the credential vault
 - **Zero model tokens** — unlike the in-box DeepSeek provider, one search never costs an auxiliary model turn
-- **Strict mode** — zero parsed results raises `WEB_PROVIDER_ERROR` (anomaly challenge / markup change), never a silent empty success
+- **Strict mode** — only DuckDuckGo result-marked anchors are accepted; zero parsed results raises `WEB_PROVIDER_ERROR`, never a silent empty success
 - **Redirect-aware parsing** — `/l/?uddg=` wrappers unwrapped to real targets; internal `duckduckgo.com` links dropped; duplicate URLs deduplicated
 - **Entity-safe text** — numeric/hex/named entities decoded with `&amp;` last, so escaped text never double-decodes
 - **GET and POST** — POST form fallback for deployments where GET trips anomaly checks
@@ -63,18 +63,26 @@ dsh --profile my-profile web
 
 ### Inside a source checkout (in-tree variant)
 
-Copy `src/` into `packages/web/web-search-ddg/src/`, add the package folder's
-`package.json` + `tsconfig.json`, wire the three files described in
-[the announcement post]() — or simply copy this repo's `src/` over an existing
-clone of the in-tree version.
+For a Harness development checkout that already contains the in-tree package,
+replace `packages/web/web-search-ddg/src/` with this repository's `src/`, then
+rebuild from the Harness root:
+
+```sh
+pnpm exec tsc -b packages/web/web-search-ddg
+pnpm exec vitest run packages/web/web-search-ddg
+```
+
+A fresh in-tree integration also needs the package added to the Harness
+workspace and build graph. For normal use, the profile installation above is
+the supported route and requires no source-tree changes.
 
 ## Config
 
 | Key | Default | Meaning |
 |---|---|---|
-| `baseURL` | `https://lite.duckduckgo.com/lite/` | The lite results page; `q` is appended. Extra params on the base (e.g. `?kl=us-en`) are preserved. |
+| `baseURL` | `https://lite.duckduckgo.com/lite/` | The lite results page. Extra params on the base (e.g. `?kl=us-en`) are preserved. |
 | `limit` | `10` | Provider-level cap on sources per search; the seam still enforces the tool request's `maxResults`. |
-| `method` | `get` | Query verb. `post` sends `q` as a URL-encoded form body. |
+| `method` | `get` | Query verb. GET sends `q` in the URL; POST sends it only as a URL-encoded form body. |
 | `timeoutMs` | `15000` | Wall-clock cap per request, independent of caller cancellation; timeouts surface as `WEB_PROVIDER_ERROR`. |
 
 Override any of them via a patch row:
@@ -93,8 +101,8 @@ Override any of them via a patch row:
 
 - **No secrets, no vault access** — the provider reads nothing from the credentials domain; there is nothing to leak.
 - **No install-time code execution** — no `prepare`/`postinstall` scripts; `lib/` ships committed, so installs run zero build scripts (the supply-chain vector the harness docs warn about).
-- **Pinned dependency ranges** — `^0.1.0` against the published `@deepseek-ai/*` packages, never `*`; align them with your running harness version if you prefer exactness.
-- **Input handling** — queries travel only inside the encoded `q` parameter to your configured `baseURL`; results are parsed as inert text (never evaluated), and internal/non-http targets are rejected before they can become citations.
+- **Bounded dependency ranges** — every published dependency has an explicit caret range, never `*`; align them with your running harness version if you prefer exactness.
+- **Input handling** — GET queries travel in the encoded `q` URL parameter; POST queries travel only in the encoded form body. Results are parsed as inert text (never evaluated), and unmarked/internal/non-http targets are rejected before they can become citations.
 - **Parser honesty** — extraction is regex-based, not a full HTML parser: adequate for the lite page's flat markup, and it only ever sees what DuckDuckGo returns. Treat result titles/snippets like any search tool's output — untrusted text entering model context.
 - **Privacy** — each query is visible to DuckDuckGo Inc. (that's how searching works); nothing else receives anything, and no telemetry exists in this package.
 
@@ -115,9 +123,11 @@ Override any of them via a patch row:
 ## Development
 
 ```sh
-pnpm install          # inside a DeepSeek Harness checkout that provides the peer packages
-pnpm exec tsc -b .    # emit lib/types
-pnpm exec vitest run packages/web/web-search-ddg   # from the checkout root: 19 tests
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm test             # 24 tests
+pnpm run build         # regenerate committed lib/
+git diff --exit-code -- lib
 ```
 
 `lib/` is committed so end users never need a build step.

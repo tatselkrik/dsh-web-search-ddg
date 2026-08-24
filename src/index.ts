@@ -20,6 +20,7 @@ import {
   DDG_DEFAULT_BASE_URL,
   DDG_DEFAULT_LIMIT,
   DDG_DEFAULT_METHOD,
+  DDG_DEFAULT_TIMEOUT_MS,
 } from './provider.ts'
 
 export {
@@ -27,6 +28,7 @@ export {
   DDG_DEFAULT_BASE_URL,
   DDG_DEFAULT_LIMIT,
   DDG_DEFAULT_METHOD,
+  DDG_DEFAULT_TIMEOUT_MS,
   DDG_PROVIDER_ID,
 } from './provider.ts'
 export type { DdgSearchProviderOptions, DdgRequestMethod } from './provider.ts'
@@ -45,12 +47,15 @@ export interface Config {
   limit?: number
   /** Query verb; POST survives some anomaly checks that GET trips. */
   method?: 'get' | 'post'
+  /** Per-request wall-clock cap in milliseconds. Defaults to 15000. */
+  timeoutMs?: number
 }
 
 export const Config: z<Config> = z.object({
   baseURL: z.string(),
   limit: z.number().step(1).min(1),
   method: z.union(['get', 'post'] as const),
+  timeoutMs: z.number().step(1).min(1),
 })
 
 /** Register the DuckDuckGo search provider with `ctx.web`. */
@@ -59,5 +64,6 @@ export function apply(ctx: Context, config: Config): void {
     baseURL: config.baseURL ?? DDG_DEFAULT_BASE_URL,
     limit: config.limit ?? DDG_DEFAULT_LIMIT,
     method: config.method ?? DDG_DEFAULT_METHOD,
+    timeoutMs: config.timeoutMs ?? DDG_DEFAULT_TIMEOUT_MS,
   })))
 }

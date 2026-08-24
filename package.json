@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-search-ddg",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Keyless DuckDuckGo web search provider for DeepSeek Harness (ctx.web seam) — zero API keys, zero tokens, zero accounts",
   "type": "module",
   "main": "lib/index.js",
@@ -32,6 +32,7 @@
     "node": ">=20.3.0"
   },
   "scripts": {
+    "build": "tsc --project tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

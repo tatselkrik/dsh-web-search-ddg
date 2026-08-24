@@ -28,6 +28,9 @@ export const DDG_DEFAULT_BASE_URL = 'https://lite.duckduckgo.com/lite/'
 /** Default upper bound on sources returned per search before seam truncation. */
 export const DDG_DEFAULT_LIMIT = 10
 
+/** Default per-request wall-clock cap, independent of caller cancellation. */
+export const DDG_DEFAULT_TIMEOUT_MS = 15_000
+
 /** Default HTTP verb for the query form. */
 export const DDG_DEFAULT_METHOD: DdgRequestMethod = 'get'
 
@@ -50,6 +53,8 @@ export interface DdgSearchProviderOptions {
   limit: number
   /** Query verb; POST survives some anomaly checks that GET trips. */
   method?: DdgRequestMethod
+  /** Per-request wall-clock cap in milliseconds. */
+  timeoutMs?: number
 }
 
 /** One parsed result row before seam normalization. */
@@ -143,23 +148,30 @@ export function parseLiteResults(html: string): ParsedRow[] {
   const rows: ParsedRow[] = []
   const seen = new Set<string>()
   const token =
-    /<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>|<t[dh][^>]*class="?result-snippet"?[^>]*>([\s\S]*?)<\/t[dh]>/gi
+    /<a\s+([^>]*\bhref\s*=\s*(["'])(.*?)\2[^>]*)>([\s\S]*?)<\/a>|<t[dh][^>]*class="?result-snippet"?[^>]*>([\s\S]*?)<\/t[dh]>/gi
   let match: RegExpExecArray | null
   let pending: ParsedRow | undefined
   while ((match = token.exec(html)) !== null) {
-    if (match[1] !== undefined) {
-      const url = unwrapResultUrl(decodeHtmlEntities(match[1]).trim())
+    if (match[3] !== undefined) {
+      if (!isResultAnchor(match[1] ?? '')) continue
+      const url = unwrapResultUrl(decodeHtmlEntities(match[3]).trim())
       if (url === undefined || seen.has(url)) continue
       seen.add(url)
-      pending = { url, ...titleOf(match[2] ?? '') }
+      pending = { url, ...titleOf(match[4] ?? '') }
       rows.push(pending)
     } else if (pending !== undefined) {
-      const snippet = stripToText(match[3] ?? '')
+      const snippet = stripToText(match[5] ?? '')
       if (snippet.length > 0) rows[rows.length - 1] = { ...pending, snippet }
       pending = undefined
     }
   }
   return rows
+}
+
+/** True when an anchor carries DuckDuckGo's result-link `nofollow` marker. */
+function isResultAnchor(attributes: string): boolean {
+  return /\brel\s*=\s*(?:"[^"]*\bnofollow\b[^"]*"|'[^']*\bnofollow\b[^']*'|[^\s>]*\bnofollow\b[^\s>]*)/i
+    .test(attributes)
 }
 
 /** Title text for one anchor, omitted when empty after stripping. */
@@ -169,15 +181,15 @@ function titleOf(innerHtml: string): { title?: string } | {} {
 }
 
 /**
- * Build the request target for one query: the configured base with `q`
- * attached, preserving any parameters an operator layered onto the base URL.
+ * Build the request target for one query. GET carries `q` in the URL; POST
+ * preserves the configured base parameters and carries `q` only in its body.
  * @param options - resolved provider options.
  * @param query - the search query.
  * @returns the absolute request URL.
  */
 export function buildRequestUrl(options: DdgSearchProviderOptions, query: string): string {
   const url = new URL(options.baseURL)
-  url.searchParams.set('q', query)
+  if ((options.method ?? DDG_DEFAULT_METHOD) === 'get') url.searchParams.set('q', query)
   return url.toString()
 }
 
@@ -194,11 +206,6 @@ export function toSearchResult(rows: readonly ParsedRow[], limit: number): WebSe
     ...row.snippet !== undefined ? { snippet: row.snippet } : {},
   }))
   return { sources, truncated: false }
-}
-
-/** True for a fetch/`AbortSignal` abort, surfaced as `WEB_ABORTED`. */
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError'
 }
 
 /** Throw the provider's stable cancellation error while retaining the reason. */
@@ -223,6 +230,30 @@ function throwIfSearchAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw searchAborted(signal)
 }
 
+interface RequestFailureContext {
+  readonly signal: AbortSignal | undefined
+  readonly composite: AbortSignal
+  readonly timeoutMs: number
+  readonly phase: 'request' | 'response body'
+}
+
+/** Classify caller cancellation, provider timeout, and other network failures. */
+function requestFailure(error: unknown, context: RequestFailureContext): WebError {
+  const { signal, composite, timeoutMs, phase } = context
+  if (signal?.aborted === true) return searchAborted(signal, error)
+
+  const reason = composite.reason
+  if (reason instanceof DOMException && reason.name === 'TimeoutError') {
+    return new WebError(
+      `DuckDuckGo search ${phase} timed out after ${timeoutMs}ms`,
+      'WEB_PROVIDER_ERROR',
+      { cause: error },
+    )
+  }
+
+  return new WebError(`DuckDuckGo search ${phase} failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+}
+
 /**
  * The DuckDuckGo-backed search provider: keyless by construction, so
  * `available()` is purely a configuration-shape check.
@@ -238,17 +269,25 @@ export class DdgSearchProvider implements WebSearchProvider {
 
   available(): boolean {
     const options = this.resolveOptions()
-    return URL.canParse(options.baseURL) && isPositiveInteger(options.limit)
+    return URL.canParse(options.baseURL)
+      && isPositiveInteger(options.limit)
+      && isPositiveInteger(options.timeoutMs ?? DDG_DEFAULT_TIMEOUT_MS)
   }
 
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
     throwIfSearchAborted(signal)
     const options = this.resolveOptions()
-    const endpoint = buildRequestUrl(options, request.query)
+    const method = options.method ?? DDG_DEFAULT_METHOD
+    const endpoint = buildRequestUrl({ ...options, method }, request.query)
+    const timeoutMs = options.timeoutMs ?? DDG_DEFAULT_TIMEOUT_MS
+    const composite = AbortSignal.any(
+      signal === undefined
+        ? [AbortSignal.timeout(timeoutMs)]
+        : [signal, AbortSignal.timeout(timeoutMs)],
+    )
     // Built per-call under `exactOptionalPropertyTypes`: an explicit
     // `body: undefined` is not assignable to `RequestInit`, so POST-only
     // fields join through conditional spreads instead.
-    const method = options.method ?? DDG_DEFAULT_METHOD
     let response: Response
     try {
       response = await fetch(endpoint, {
@@ -259,11 +298,10 @@ export class DdgSearchProvider implements WebSearchProvider {
           ...method === 'post' ? { 'content-type': 'application/x-www-form-urlencoded' } : {},
         },
         ...(method === 'post' ? { body: new URLSearchParams({ q: request.query }).toString() } : {}),
-        ...signal !== undefined ? { signal } : {},
+        signal: composite,
       })
     } catch (error: unknown) {
-      if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error)
-      throw new WebError(`DuckDuckGo search request failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+      throw requestFailure(error, { signal, composite, timeoutMs, phase: 'request' })
     }
 
     if (!response.ok) {
@@ -277,8 +315,7 @@ export class DdgSearchProvider implements WebSearchProvider {
     try {
       html = await response.text()
     } catch (error: unknown) {
-      if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error)
-      throw new WebError(`DuckDuckGo response body failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+      throw requestFailure(error, { signal, composite, timeoutMs, phase: 'response body' })
     }
 
     const rows = parseLiteResults(html)

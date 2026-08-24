@@ -1,6 +1,8 @@
 /** Unit coverage for the DuckDuckGo lite-page parser and provider plumbing. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { WebError } from '@deepseek-ai/dsh-web'
+import { Context } from '@deepseek-ai/cordis'
+import WebRuntime, { WebError } from '@deepseek-ai/dsh-web'
+import * as ddgPlugin from '../src/index.ts'
 import {
   DdgSearchProvider,
   buildRequestUrl,
@@ -39,6 +41,26 @@ const FIXTURE = [
   '</table>',
   '</body></html>',
 ].join('\n')
+
+/** Require the provider-created composite signal from a mocked fetch call. */
+function requiredSignal(init?: RequestInit): AbortSignal {
+  const signal = init?.signal
+  if (!(signal instanceof AbortSignal)) throw new Error('expected fetch signal')
+  return signal
+}
+
+/** Keep the event loop alive while a mocked request or body waits for abort. */
+function rejectOnAbort<T>(signal: AbortSignal, reason: () => unknown): Promise<T> {
+  return new Promise<T>((_resolve, reject) => {
+    const keeper = setTimeout(() => {}, 250)
+    const abort = (): void => {
+      clearTimeout(keeper)
+      reject(reason())
+    }
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+  })
+}
 
 describe('decodeHtmlEntities', () => {
   it('decodes named, numeric, hex, and keeps &amp; last so entities never double-decode', () => {
@@ -103,6 +125,11 @@ describe('parseLiteResults + toSearchResult ordering contract', () => {
     expect(rows.filter(row => row.url === 'https://example.com/a')).toHaveLength(1)
   })
 
+  it('ignores unrelated external anchors so anomaly pages stay loud', () => {
+    const anomaly = '<html><body>Challenge <a href="https://captcha.example/help">Help</a></body></html>'
+    expect(parseLiteResults(anomaly)).toEqual([])
+  })
+
   it('caps sources at the provider limit and never claims seam truncation', async () => {
     const provider = new DdgSearchProvider(() => ({
       baseURL: 'https://lite.duckduckgo.com/lite/',
@@ -164,6 +191,40 @@ describe('DdgSearchProvider.search plumbing', () => {
     expect((error as WebError).code).toBe('WEB_PROVIDER_ERROR')
   })
 
+  it('surfaces a request timeout as WEB_PROVIDER_ERROR', async () => {
+    const timeoutProvider = new DdgSearchProvider(() => ({
+      baseURL: 'https://lite.duckduckgo.com/lite/',
+      limit: 10,
+      timeoutMs: 20,
+    }))
+    vi.stubGlobal('fetch', vi.fn((_input: unknown, init?: RequestInit) => {
+      const signal = requiredSignal(init)
+      return rejectOnAbort<Response>(signal, () => signal.reason)
+    }))
+    const error = await timeoutProvider.search({ query: 'q' }).catch((e: unknown) => e)
+    expect((error as WebError).code).toBe('WEB_PROVIDER_ERROR')
+    expect((error as Error).message).toContain('request timed out')
+  })
+
+  it('classifies an AbortError from a timed-out response body as WEB_PROVIDER_ERROR', async () => {
+    const timeoutProvider = new DdgSearchProvider(() => ({
+      baseURL: 'https://lite.duckduckgo.com/lite/',
+      limit: 10,
+      timeoutMs: 20,
+    }))
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
+      const signal = requiredSignal(init)
+      return {
+        ok: true,
+        status: 200,
+        text: () => rejectOnAbort<string>(signal, () => new DOMException('aborted', 'AbortError')),
+      } as Response
+    }))
+    const error = await timeoutProvider.search({ query: 'q' }).catch((e: unknown) => e)
+    expect((error as WebError).code).toBe('WEB_PROVIDER_ERROR')
+    expect((error as Error).message).toContain('response body timed out')
+  })
+
   it('reports pre-aborted searches as WEB_ABORTED without dispatching', async () => {
     const controller = new AbortController()
     controller.abort()
@@ -174,19 +235,34 @@ describe('DdgSearchProvider.search plumbing', () => {
     expect((error as WebError).code).toBe('WEB_ABORTED')
   })
 
-  it('sends q as form body under POST method', async () => {
+  it('reports in-flight caller cancellation as WEB_ABORTED', async () => {
+    const controller = new AbortController()
+    vi.stubGlobal('fetch', vi.fn((_input: unknown, init?: RequestInit) => {
+      const signal = requiredSignal(init)
+      return rejectOnAbort<Response>(signal, () => new DOMException('aborted', 'AbortError'))
+    }))
+    const pending = okProvider.search({ query: 'q' }, controller.signal)
+    controller.abort(new DOMException('cancelled', 'AbortError'))
+    const error = await pending.catch((e: unknown) => e)
+    expect((error as WebError).code).toBe('WEB_ABORTED')
+  })
+
+  it('sends q only in the form body under POST method', async () => {
     const postProvider = new DdgSearchProvider(() => ({
-      baseURL: 'https://lite.duckduckgo.com/lite/',
+      baseURL: 'https://lite.duckduckgo.com/lite/?kl=us-en',
       limit: 10,
       method: 'post',
     }))
+    let seenUrl: string | undefined
     let seenBody: string | undefined
-    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
+      seenUrl = String(input)
       seenBody = init?.body as string
       return new Response(FIXTURE, { status: 200 })
     }))
     await postProvider.search({ query: 'two words' })
-    expect(seenBody).toContain('q=two+words')
+    expect(seenUrl).toBe('https://lite.duckduckgo.com/lite/?kl=us-en')
+    expect(seenBody).toBe('q=two+words')
   })
 })
 
@@ -195,9 +271,15 @@ describe('configuration shape', () => {
     const good = new DdgSearchProvider(() => ({ baseURL: 'https://lite.duckduckgo.com/lite/', limit: 10 }))
     const badUrl = new DdgSearchProvider(() => ({ baseURL: '::nope::', limit: 10 }))
     const badLimit = new DdgSearchProvider(() => ({ baseURL: 'https://lite.duckduckgo.com/lite/', limit: 0 }))
+    const badTimeout = new DdgSearchProvider(() => ({
+      baseURL: 'https://lite.duckduckgo.com/lite/',
+      limit: 10,
+      timeoutMs: 0,
+    }))
     expect(good.available()).toBe(true)
     expect(badUrl.available()).toBe(false)
     expect(badLimit.available()).toBe(false)
+    expect(badTimeout.available()).toBe(false)
   })
 
   it('buildRequestUrl preserves operator parameters while setting q', () => {
@@ -205,5 +287,21 @@ describe('configuration shape', () => {
       { baseURL: 'https://proxy.internal/lite/?kl=us-en', limit: 5 },
       'two words',
     )).toBe('https://proxy.internal/lite/?kl=us-en&q=two+words')
+    expect(buildRequestUrl(
+      { baseURL: 'https://proxy.internal/lite/?kl=us-en', limit: 5, method: 'post' },
+      'two words',
+    )).toBe('https://proxy.internal/lite/?kl=us-en')
+  })
+})
+
+describe('web-search-ddg plugin registration', () => {
+  it('runs through the ctx.web seam and honors maxResults truncation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(FIXTURE, { status: 200 })))
+    const ctx = new Context()
+    const web = new WebRuntime(ctx, { searchProvider: 'duckduckgo' })
+    ddgPlugin.apply(ctx, { limit: 10, timeoutMs: 1_000 })
+    const result = await web.search({ query: 'q', maxResults: 1 })
+    expect(result.sources).toHaveLength(1)
+    expect(result.truncated).toBe(true)
   })
 })
