@@ -4,10 +4,9 @@
  * credential: this is an UNOFFICIAL endpoint, so the parser owns every
  * robustness concern the other providers delegate to a structured API.
  *
- * Wire behavior: one GET (or POST form) request per search carrying `q` and,
- * when configured, the region as `kl`; result anchors are extracted in
- * document order, `/l/?uddg=` redirect wrappers are unwrapped, internal
- * `duckduckgo.com` targets are dropped, and results are deduplicated
+ * Wire behavior: one GET (or POST form) request per search; result anchors are
+ * extracted in document order, `/l/?uddg=` redirect wrappers are unwrapped,
+ * internal `duckduckgo.com` targets are dropped, and results are deduplicated
  * by URL. Absence of parsed results is an error rather than an empty success.
  * @module @deepseek-ai/dsh-web-search-ddg/provider
  */
@@ -26,13 +25,6 @@ export declare const DDG_DEFAULT_LIMIT = 10;
 export declare const DDG_DEFAULT_TIMEOUT_MS = 15000;
 /** Default HTTP verb for the query form. */
 export declare const DDG_DEFAULT_METHOD: DdgRequestMethod;
-/**
- * Shape of a DuckDuckGo `kl` region code (`us-en`, `de-de`, `wt-wt`, …): a
- * lowercase `<country>-<language>` pair. Deliberately a shape check, not a
- * whitelist — the endpoint owns the code list and may grow it without notice;
- * an unknown-but-well-shaped code is the endpoint's call to accept or ignore.
- */
-export declare const DDG_REGION_PATTERN: RegExp;
 /** HTTP verbs the provider may use against the lite form. */
 export type DdgRequestMethod = 'get' | 'post';
 /** Resolved provider options. */
@@ -43,14 +35,6 @@ export interface DdgSearchProviderOptions {
     limit: number;
     /** Query verb; POST survives some anomaly checks that GET trips. */
     method?: DdgRequestMethod;
-    /**
-     * DuckDuckGo region code sent as the form's `kl` parameter (e.g. `us-en`,
-     * `de-de`, `wt-wt` for "no region"). Absent/empty omits `kl` entirely, which
-     * is the endpoint's own default behavior; a non-empty value that does not
-     * match {@link DDG_REGION_PATTERN} makes the provider unavailable rather than
-     * silently searching the wrong region.
-     */
-    region?: string;
     /** Per-request wall-clock cap in milliseconds; defaults to {@link DDG_DEFAULT_TIMEOUT_MS}. */
     timeoutMs?: number;
 }
@@ -93,23 +77,8 @@ export declare function unwrapResultUrl(href: string): string | undefined;
  */
 export declare function parseLiteResults(html: string): ParsedRow[];
 /**
- * Normalize a configured region: trim, lowercase, and collapse emptiness to
- * `undefined` so "not set" has exactly one representation on the wire (the
- * parameter's absence).
- * @param region - the raw configured region, if any.
- * @returns the normalized code, or `undefined` when unset.
- */
-export declare function normalizeRegion(region: string | undefined): string | undefined;
-/**
- * True when a normalized region matches the {@link DDG_REGION_PATTERN} shape.
- * @param region - an already-normalized region.
- * @returns whether the endpoint should be asked for it.
- */
-export declare function isSupportedRegion(region: string): boolean;
-/**
  * Build the request target for one query: the configured base with `q`
- * attached — plus `kl` when a region is configured — preserving any
- * parameters an operator layered onto the base URL.
+ * attached, preserving any parameters an operator layered onto the base URL.
  * @param options - resolved provider options.
  * @param query - the search query.
  * @returns the absolute request URL.

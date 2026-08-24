@@ -4,10 +4,9 @@
  * credential: this is an UNOFFICIAL endpoint, so the parser owns every
  * robustness concern the other providers delegate to a structured API.
  *
- * Wire behavior: one GET (or POST form) request per search carrying `q` and,
- * when configured, the region as `kl`; result anchors are extracted in
- * document order, `/l/?uddg=` redirect wrappers are unwrapped, internal
- * `duckduckgo.com` targets are dropped, and results are deduplicated
+ * Wire behavior: one GET (or POST form) request per search; result anchors are
+ * extracted in document order, `/l/?uddg=` redirect wrappers are unwrapped,
+ * internal `duckduckgo.com` targets are dropped, and results are deduplicated
  * by URL. Absence of parsed results is an error rather than an empty success.
  * @module @deepseek-ai/dsh-web-search-ddg/provider
  */
@@ -29,23 +28,8 @@ export const DDG_DEFAULT_BASE_URL = 'https://lite.duckduckgo.com/lite/'
 /** Default upper bound on sources returned per search before seam truncation. */
 export const DDG_DEFAULT_LIMIT = 10
 
-/**
- * Default per-request wall-clock cap, independent of caller cancellation: the
- * provider must not hang forever merely because a future consumer forgot its
- * timeout policy.
- */
-export const DDG_DEFAULT_TIMEOUT_MS = 15_000
-
 /** Default HTTP verb for the query form. */
 export const DDG_DEFAULT_METHOD: DdgRequestMethod = 'get'
-
-/**
- * Shape of a DuckDuckGo `kl` region code (`us-en`, `de-de`, `wt-wt`, …): a
- * lowercase `<country>-<language>` pair. Deliberately a shape check, not a
- * whitelist — the endpoint owns the code list and may grow it without notice;
- * an unknown-but-well-shaped code is the endpoint's call to accept or ignore.
- */
-export const DDG_REGION_PATTERN = /^[a-z]{2}-[a-z]{2}$/
 
 /**
  * Browser-shaped User-Agent. The endpoint is unofficial and serves anomalies
@@ -66,16 +50,6 @@ export interface DdgSearchProviderOptions {
   limit: number
   /** Query verb; POST survives some anomaly checks that GET trips. */
   method?: DdgRequestMethod
-  /**
-   * DuckDuckGo region code sent as the form's `kl` parameter (e.g. `us-en`,
-   * `de-de`, `wt-wt` for "no region"). Absent/empty omits `kl` entirely, which
-   * is the endpoint's own default behavior; a non-empty value that does not
-   * match {@link DDG_REGION_PATTERN} makes the provider unavailable rather than
-   * silently searching the wrong region.
-   */
-  region?: string
-  /** Per-request wall-clock cap in milliseconds; defaults to {@link DDG_DEFAULT_TIMEOUT_MS}. */
-  timeoutMs?: number
 }
 
 /** One parsed result row before seam normalization. */
@@ -195,30 +169,8 @@ function titleOf(innerHtml: string): { title?: string } | {} {
 }
 
 /**
- * Normalize a configured region: trim, lowercase, and collapse emptiness to
- * `undefined` so "not set" has exactly one representation on the wire (the
- * parameter's absence).
- * @param region - the raw configured region, if any.
- * @returns the normalized code, or `undefined` when unset.
- */
-export function normalizeRegion(region: string | undefined): string | undefined {
-  const trimmed = region?.trim().toLowerCase()
-  return trimmed ? trimmed : undefined
-}
-
-/**
- * True when a normalized region matches the {@link DDG_REGION_PATTERN} shape.
- * @param region - an already-normalized region.
- * @returns whether the endpoint should be asked for it.
- */
-export function isSupportedRegion(region: string): boolean {
-  return DDG_REGION_PATTERN.test(region)
-}
-
-/**
  * Build the request target for one query: the configured base with `q`
- * attached — plus `kl` when a region is configured — preserving any
- * parameters an operator layered onto the base URL.
+ * attached, preserving any parameters an operator layered onto the base URL.
  * @param options - resolved provider options.
  * @param query - the search query.
  * @returns the absolute request URL.
@@ -226,8 +178,6 @@ export function isSupportedRegion(region: string): boolean {
 export function buildRequestUrl(options: DdgSearchProviderOptions, query: string): string {
   const url = new URL(options.baseURL)
   url.searchParams.set('q', query)
-  const region = normalizeRegion(options.region)
-  if (region !== undefined) url.searchParams.set('kl', region)
   return url.toString()
 }
 
@@ -273,34 +223,6 @@ function throwIfSearchAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw searchAborted(signal)
 }
 
-/** Inputs to {@link requestFailure}, kept positional-free at call sites. */
-interface FailureContext {
-  /** The caller's signal, when one was passed. Explicit union: under `exactOptionalPropertyTypes`, optional properties reject explicit `undefined`. */
-  signal: AbortSignal | undefined
-  /** The composite signal handed to `fetch`. */
-  composite: AbortSignal
-  /** The configured wall-clock cap, for the timeout message. */
-  timeoutMs: number
-  /** Which await rejected, for the message. */
-  phase: 'request' | 'body'
-}
-
-/**
- * Classify one network-phase rejection. Precedence: caller cancellation is
- * `WEB_ABORTED`, our own wall clock is a timeout `WEB_PROVIDER_ERROR`, and
- * everything else keeps the original error as `cause`.
- */
-function requestFailure(error: unknown, context: FailureContext): WebError {
-  const { signal, composite, timeoutMs, phase } = context
-  if (signal?.aborted === true || isAbortError(error)) return searchAborted(signal, error)
-  const reason = composite.reason
-  if (reason instanceof DOMException && reason.name === 'TimeoutError') {
-    return new WebError(`DuckDuckGo search ${phase} timed out after ${timeoutMs}ms`, 'WEB_PROVIDER_ERROR', { cause: error })
-  }
-  const detail = phase === 'request' ? 'request failed' : 'response body failed'
-  return new WebError(`DuckDuckGo search ${detail}: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-}
-
 /**
  * The DuckDuckGo-backed search provider: keyless by construction, so
  * `available()` is purely a configuration-shape check.
@@ -316,30 +238,17 @@ export class DdgSearchProvider implements WebSearchProvider {
 
   available(): boolean {
     const options = this.resolveOptions()
-    const region = normalizeRegion(options.region)
-    return URL.canParse(options.baseURL)
-      && isPositiveInteger(options.limit)
-      && (region === undefined || isSupportedRegion(region))
-      && isPositiveInteger(options.timeoutMs ?? DDG_DEFAULT_TIMEOUT_MS)
+    return URL.canParse(options.baseURL) && isPositiveInteger(options.limit)
   }
 
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
     throwIfSearchAborted(signal)
     const options = this.resolveOptions()
     const endpoint = buildRequestUrl(options, request.query)
-    const timeoutMs = options.timeoutMs ?? DDG_DEFAULT_TIMEOUT_MS
-    // Composite cancellation: the caller's signal AND our own wall clock. The
-    // provider must never outlive its budget just because a future consumer
-    // forgot a timeout policy; caller aborts still surface as WEB_ABORTED.
-    const composite = AbortSignal.any(
-      signal !== undefined ? [signal, AbortSignal.timeout(timeoutMs)] : [AbortSignal.timeout(timeoutMs)],
-    )
     // Built per-call under `exactOptionalPropertyTypes`: an explicit
     // `body: undefined` is not assignable to `RequestInit`, so POST-only
-    // fields join through conditional spreads instead. The region rides the
-    // form body (`kl`) under POST, mirroring what GET attaches to the URL.
+    // fields join through conditional spreads instead.
     const method = options.method ?? DDG_DEFAULT_METHOD
-    const region = normalizeRegion(options.region)
     let response: Response
     try {
       response = await fetch(endpoint, {
@@ -349,13 +258,12 @@ export class DdgSearchProvider implements WebSearchProvider {
           'accept': 'text/html,application/xhtml+xml',
           ...method === 'post' ? { 'content-type': 'application/x-www-form-urlencoded' } : {},
         },
-        ...(method === 'post'
-          ? { body: new URLSearchParams({ q: request.query, ...region !== undefined ? { kl: region } : {} }).toString() }
-          : {}),
-        signal: composite,
+        ...(method === 'post' ? { body: new URLSearchParams({ q: request.query }).toString() } : {}),
+        ...signal !== undefined ? { signal } : {},
       })
     } catch (error: unknown) {
-      throw requestFailure(error, { signal, composite, timeoutMs, phase: 'request' })
+      if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error)
+      throw new WebError(`DuckDuckGo search request failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
     }
 
     if (!response.ok) {
@@ -369,7 +277,8 @@ export class DdgSearchProvider implements WebSearchProvider {
     try {
       html = await response.text()
     } catch (error: unknown) {
-      throw requestFailure(error, { signal, composite, timeoutMs, phase: 'body' })
+      if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error)
+      throw new WebError(`DuckDuckGo response body failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
     }
 
     const rows = parseLiteResults(html)

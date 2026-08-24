@@ -5,8 +5,6 @@ import {
   DdgSearchProvider,
   buildRequestUrl,
   decodeHtmlEntities,
-  isSupportedRegion,
-  normalizeRegion,
   parseLiteResults,
   stripToText,
   unwrapResultUrl,
@@ -207,68 +205,5 @@ describe('configuration shape', () => {
       { baseURL: 'https://proxy.internal/lite/?kl=us-en', limit: 5 },
       'two words',
     )).toBe('https://proxy.internal/lite/?kl=us-en&q=two+words')
-  })
-})
-
-describe('region plumbing', () => {
-  it('normalizeRegion trims, lowercases, and collapses emptiness to undefined', () => {
-    expect(normalizeRegion(undefined)).toBeUndefined()
-    expect(normalizeRegion('')).toBeUndefined()
-    expect(normalizeRegion('   ')).toBeUndefined()
-    expect(normalizeRegion(' US-EN ')).toBe('us-en')
-    expect(normalizeRegion('de-de')).toBe('de-de')
-  })
-
-  it('DDG_REGION_PATTERN accepts well-shaped codes only', () => {
-    for (const code of ['us-en', 'de-de', 'wt-wt']) expect(isSupportedRegion(code)).toBe(true)
-    for (const bad of ['en', 'usa-en', 'us_en', 'us-', '-en', 'us-ena', '1a-bc']) {
-      expect(isSupportedRegion(bad)).toBe(false)
-    }
-  })
-
-  it('buildRequestUrl attaches kl after operator parameters when region is set', () => {
-    expect(buildRequestUrl(
-      { baseURL: 'https://proxy.internal/lite/?safe=1', limit: 5, region: 'DE-DE' },
-      'q',
-    )).toBe('https://proxy.internal/lite/?safe=1&q=q&kl=de-de')
-  })
-
-  it('buildRequestUrl omits kl entirely when no region is configured (default unchanged)', () => {
-    const url = buildRequestUrl({ baseURL: 'https://lite.duckduckgo.com/lite/', limit: 5 }, 'q')
-    expect(url).toBe('https://lite.duckduckgo.com/lite/?q=q')
-  })
-
-  it('available() rejects a malformed region instead of silently searching the wrong one', () => {
-    const good = new DdgSearchProvider(() => ({ baseURL: 'https://lite.duckduckgo.com/lite/', limit: 10, region: 'us-en' }))
-    const malformed = new DdgSearchProvider(() => ({ baseURL: 'https://lite.duckduckgo.com/lite/', limit: 10, region: 'banana' }))
-    expect(good.available()).toBe(true)
-    expect(malformed.available()).toBe(false)
-  })
-
-  it('sends kl in the form body under POST when a region is configured', async () => {
-    const postProvider = new DdgSearchProvider(() => ({
-      baseURL: 'https://lite.duckduckgo.com/lite/',
-      limit: 10,
-      method: 'post',
-      region: ' de-de ',
-    }))
-    let seenBody: string | undefined
-    let seenUrl = ''
-    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      seenUrl = String(input)
-      seenBody = init?.body as string
-      return new Response(FIXTURE, { status: 200 })
-    }))
-    try {
-      await postProvider.search({ query: 'two words' })
-      expect(seenBody).toContain('q=two+words')
-      // Region rides BOTH carriers under POST: the URL (set verb-agnostically
-      // by buildRequestUrl) and the form body (so body-only consumers/proxies
-      // see a request consistent with its q).
-      expect(seenBody).toContain('kl=de-de')
-      expect(seenUrl).toContain('kl=de-de')
-    } finally {
-      vi.unstubAllGlobals()
-    }
   })
 })

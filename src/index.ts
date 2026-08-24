@@ -20,7 +20,6 @@ import {
   DDG_DEFAULT_BASE_URL,
   DDG_DEFAULT_LIMIT,
   DDG_DEFAULT_METHOD,
-  DDG_DEFAULT_TIMEOUT_MS,
 } from './provider.ts'
 
 export {
@@ -28,11 +27,7 @@ export {
   DDG_DEFAULT_BASE_URL,
   DDG_DEFAULT_LIMIT,
   DDG_DEFAULT_METHOD,
-  DDG_DEFAULT_TIMEOUT_MS,
   DDG_PROVIDER_ID,
-  DDG_REGION_PATTERN,
-  isSupportedRegion,
-  normalizeRegion,
 } from './provider.ts'
 export type { DdgSearchProviderOptions, DdgRequestMethod } from './provider.ts'
 
@@ -50,22 +45,12 @@ export interface Config {
   limit?: number
   /** Query verb; POST survives some anomaly checks that GET trips. */
   method?: 'get' | 'post'
-  /**
-   * DuckDuckGo region code sent as `kl` (e.g. `us-en`, `de-de`, `wt-wt`).
-   * Empty/absent omits the parameter; a value not shaped `<xx>-<xx>` makes the
-   * provider unavailable instead of silently searching the wrong region.
-   */
-  region?: string
-  /** Per-request wall-clock cap in milliseconds. Defaults to 15000. */
-  timeoutMs?: number
 }
 
 export const Config: z<Config> = z.object({
   baseURL: z.string(),
   limit: z.number().step(1).min(1),
   method: z.union(['get', 'post'] as const),
-  region: z.string(),
-  timeoutMs: z.number().step(1).min(1),
 })
 
 /** Register the DuckDuckGo search provider with `ctx.web`. */
@@ -74,9 +59,5 @@ export function apply(ctx: Context, config: Config): void {
     baseURL: config.baseURL ?? DDG_DEFAULT_BASE_URL,
     limit: config.limit ?? DDG_DEFAULT_LIMIT,
     method: config.method ?? DDG_DEFAULT_METHOD,
-    // Conditional spread, not `region: undefined`: under
-    // `exactOptionalPropertyTypes` an explicit undefined is not assignable.
-    ...(config.region !== undefined ? { region: config.region } : {}),
-    timeoutMs: config.timeoutMs ?? DDG_DEFAULT_TIMEOUT_MS,
   })))
 }
